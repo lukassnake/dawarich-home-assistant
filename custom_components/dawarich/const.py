@@ -21,3 +21,15 @@ class DawarichTrackerStates(Enum):
     UNKNOWN = "unknown"
     SUCCESS = "success"
     ERROR = "error"
+
+
+# Dynamic High Accuracy intervals based on connected Bluetooth devices.
+DEFAULT_BLUETOOTH_SENSOR = "sensor.s26ultra_bluetooth_connection"
+DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL = 15
+DEFAULT_CAR_HIGH_ACCURACY_INTERVAL = 7
+DEFAULT_NOTIFY_SERVICE = "notify.mobile_app_s26ultra"
+CAR_BLUETOOTH_MAC_ADDRESSES = {
+    "FC:35:E6:A3:1C:32",  # Mazda
+    "48:F0:7B:C4:DE:21",  # Skoda BT 9667
+    "E2:C0:B3:05:A3:DF",  # smartBox-1203
+}

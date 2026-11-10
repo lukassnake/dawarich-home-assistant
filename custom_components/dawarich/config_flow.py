@@ -14,6 +14,7 @@ from homeassistant.const import (
     CONF_SSL,
     CONF_VERIFY_SSL,
 )
+from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
@@ -22,6 +23,10 @@ from .const import (
     DEFAULT_PORT,
     DEFAULT_SSL,
     DEFAULT_VERIFY_SSL,
+    DEFAULT_BLUETOOTH_SENSOR,
+    DEFAULT_CAR_HIGH_ACCURACY_INTERVAL,
+    DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
+    DEFAULT_NOTIFY_SERVICE,
     DOMAIN,
 )
 from .helpers import get_api
@@ -31,6 +36,12 @@ _LOGGER = logging.getLogger(__name__)
 
 class DawarichConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Dawarich."""
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        """Expose forwarding options for an existing integration."""
+        return DawarichOptionsFlow()
 
     VERSION = 2
 
@@ -192,7 +203,8 @@ class DawarichConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 current_port = int(port_str)
             except ValueError:
                 _LOGGER.warning(
-                    "Failed to parse port from stored host value '%s', using default port %s",
+                    "Failed to parse port from stored host value '%s', "
+                    "using default port %s",
                     host_and_port_string,
                     DEFAULT_PORT,
                 )
@@ -302,3 +314,88 @@ class DawarichConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return {CONF_API_KEY: "invalid api key"}
             case _:
                 return {"base": "connection_error"}
+
+
+class DawarichOptionsFlow(config_entries.OptionsFlowWithReload):
+    """Configure protected zones and confirmed-still filtering."""
+
+    async def async_step_init(self, user_input=None):
+        """Show editable forwarding rules."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+        options = self.config_entry.options
+        fields = {
+            vol.Required(
+                "filter_enabled", default=options.get("filter_enabled", False)
+            ): bool,
+            vol.Optional(
+                "protected_zones", default=options.get("protected_zones", [])
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="zone", multiple=True)
+            ),
+            vol.Optional(
+                "activity_sensor",
+                description={"suggested_value": options.get("activity_sensor")},
+            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+        }
+        fields[
+            vol.Required(
+                "still_detection_enabled",
+                default=options.get("still_detection_enabled", True),
+            )
+        ] = bool
+        fields[
+            vol.Optional(
+                "high_accuracy_sensor",
+                description={"suggested_value": options.get("high_accuracy_sensor")},
+            )
+        ] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="binary_sensor")
+        )
+        fields[
+            vol.Optional(
+                "bluetooth_sensor",
+                default=options.get("bluetooth_sensor", DEFAULT_BLUETOOTH_SENSOR),
+            )
+        ] = selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        )
+        fields[
+            vol.Optional(
+                "notify_service",
+                default=options.get("notify_service", DEFAULT_NOTIFY_SERVICE),
+            )
+        ] = str
+        for key, default, minimum, maximum, step in (
+            (
+                "normal_high_accuracy_interval",
+                DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
+                5,
+                3600,
+                1,
+            ),
+            (
+                "car_high_accuracy_interval",
+                DEFAULT_CAR_HIGH_ACCURACY_INTERVAL,
+                5,
+                3600,
+                1,
+            ),
+            ("arrival_minutes", 5, 0, 60, 1),
+            ("zone_interval_minutes", 60, 1, 1440, 1),
+            ("exit_seconds", 120, 0, 600, 1),
+            ("still_seconds", 120, 0, 600, 1),
+            ("still_update_interval_minutes", 5, 1, 1440, 1),
+            ("still_speed", 0.5, 0, 10, 0.1),
+        ):
+            fields[vol.Required(key, default=options.get(key, default))] = (
+                selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=minimum,
+                        max=maximum,
+                        step=step,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                )
+            )
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields))
