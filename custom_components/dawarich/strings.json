@@ -61,5 +61,27 @@
       "title": "Dawarich API unavailable",
       "description": "The Dawarich API at `{url}` is not reachable. The server returned status code {status_code} with error: {error}. Please make sure that your Dawarich server is running and is accessible."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Tracking filter",
+        "description": "Zone intervals apply to fresh tracker updates. No scheduled location requests are made. Leave activity sensor empty to disable still filtering. High Accuracy ON bypasses zone limits and still filtering.",
+        "data": {
+          "filter_enabled": "Enable forwarding filter",
+          "protected_zones": "Zones with reduced forwarding",
+          "activity_sensor": "Detected activity sensor (optional)",
+          "arrival_minutes": "Send all arrival updates for (minutes)",
+          "zone_interval_minutes": "Minimum interval in zones (minutes)",
+          "exit_seconds": "Confirm leaving zone after (seconds)",
+          "still_detection_enabled": "Enable still detection",
+          "still_seconds": "Confirm still activity after (seconds)",
+          "still_update_interval_minutes": "Kontrolní bod při nehybnosti (minuty)",
+          "still_speed": "Still speed threshold (m/s)",
+          "high_accuracy_sensor": "High Accuracy sensor – forward all updates when ON",
+          "car_bluetooth_devices": "Car Bluetooth device MAC addresses (one per line)"
+        }
+      }
+    }
   }
 }

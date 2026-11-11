@@ -1,6 +1,8 @@
 """Show statistical data from your Dawarich instance."""
 
 import logging
+import re
+from asyncio import Lock
 from datetime import UTC, datetime
 
 from dawarich_api import DawarichAPI
@@ -30,15 +32,32 @@ from homeassistant.helpers.issue_registry import (
     async_create_issue,
     async_delete_issue,
 )
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
 )
+from homeassistant.util import dt as dt_util
 
 from custom_components.dawarich import DawarichConfigEntry
 
-from .const import CONF_DEVICE, DOMAIN, DawarichTrackerStates
+from .const import (
+    DEFAULT_CAR_BLUETOOTH_DEVICES,
+    CONF_DEVICE,
+    DEFAULT_BLUETOOTH_SENSOR,
+    DEFAULT_CAR_HIGH_ACCURACY_INTERVAL,
+    DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
+    DEFAULT_NOTIFY_SERVICE,
+    DOMAIN,
+    DawarichTrackerStates,
+)
 from .coordinator import DawarichStatsCoordinator, DawarichVersionCoordinator
+from .tracking_filter import (
+    FilterSettings,
+    TrackingFilter,
+    finite_number,
+    parse_bluetooth_macs,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,6 +158,7 @@ async def async_setup_entry(
         sensors.append(
             DawarichTrackerSensor(
                 entry_id=entry_id,
+                options=dict(entry.options),
                 device_name=name,
                 mobile_app=mobile_app,
                 api=api,
@@ -159,6 +179,7 @@ class DawarichTrackerSensor(SensorEntity):
     def __init__(
         self,
         entry_id: str,
+        options: dict,
         device_name: str,
         mobile_app: str,
         api: DawarichAPI,
@@ -176,20 +197,218 @@ class DawarichTrackerSensor(SensorEntity):
         self._attr_device_class = description.device_class
         self.entity_description = description
         self._repair_issue_created = False
-
-        self._async_unsubscribe_state_changed = async_track_state_change_event(
-            hass=self._hass,
-            entity_ids=[self._mobile_app],
-            action=self._async_update_callback,
+        self._filter = TrackingFilter(
+            FilterSettings(
+                enabled=options.get("filter_enabled", False),
+                arrival_seconds=options.get("arrival_minutes", 5) * 60,
+                zone_interval_seconds=options.get("zone_interval_minutes", 60) * 60,
+                exit_seconds=options.get("exit_seconds", 120),
+                still_detection_enabled=options.get("still_detection_enabled", True),
+                still_seconds=options.get("still_seconds", 120),
+                still_update_interval_seconds=options.get("still_update_interval_minutes", 5) * 60,
+                still_speed=options.get("still_speed", 0.5),
+            )
         )
+        self._protected_zones = set(options.get("protected_zones", []))
+        self._activity_sensor = options.get("activity_sensor")
+        self._high_accuracy_sensor = options.get("high_accuracy_sensor")
+        self._bluetooth_sensor = options.get(
+            "bluetooth_sensor", DEFAULT_BLUETOOTH_SENSOR
+        )
+        self._normal_high_accuracy_interval = int(
+            options.get(
+                "normal_high_accuracy_interval",
+                DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
+            )
+        )
+        self._car_high_accuracy_interval = int(
+            options.get(
+                "car_high_accuracy_interval", DEFAULT_CAR_HIGH_ACCURACY_INTERVAL
+            )
+        )
+        self._notify_service = options.get("notify_service", DEFAULT_NOTIFY_SERVICE)
+        self._car_bluetooth_devices = parse_bluetooth_macs(
+            options.get("car_bluetooth_devices", DEFAULT_CAR_BLUETOOTH_DEVICES)
+        )
+        self._last_requested_interval = None
+        self._filter_reason = "waiting_for_update"
+        self._send_lock = Lock()
+        self._filter_store = Store(
+            hass,
+            1,
+            f"{DOMAIN}.tracking_filter.{entry_id}",
+            serialize_in_event_loop=True,
+        )
+        self._closing = False
+
+        self._async_unsubscribe_state_changed = None
+        self._async_unsubscribe_bluetooth_changed = None
         self._state: DawarichTrackerStates = DawarichTrackerStates.UNKNOWN
         self._attr_options = [state.value for state in DawarichTrackerStates]
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
-        # Check initial state of the tracked entity
+        await super().async_added_to_hass()
+        stored = await self._filter_store.async_load()
+        if (
+            isinstance(stored, dict)
+            and stored.get("source") == self._mobile_app
+            and stored.get("protected_zones") == sorted(self._protected_zones)
+            and isinstance(stored.get("state"), dict)
+        ):
+            self._filter.restore(
+                stored["state"], self._protected_zones, dt_util.utcnow().timestamp()
+            )
         initial_state = self._hass.states.get(self._mobile_app)
-        self._async_check_entity_availability(initial_state)
+        if self._async_check_entity_availability(initial_state):
+            self._filter.observe_zone(
+                self._get_protected_zone(initial_state), dt_util.utcnow().timestamp()
+            )
+        self._async_unsubscribe_state_changed = async_track_state_change_event(
+            hass=self._hass,
+            entity_ids=[self._mobile_app],
+            action=self._async_update_callback,
+        )
+        if self._bluetooth_sensor:
+            self._async_unsubscribe_bluetooth_changed = async_track_state_change_event(
+                hass=self._hass,
+                entity_ids=[self._bluetooth_sensor],
+                action=self._async_bluetooth_changed,
+            )
+            await self._async_update_high_accuracy_interval()
+
+    @staticmethod
+    def _connected_bluetooth_macs(state) -> set[str]:
+        """Extract MAC addresses from Companion App connected-device attributes."""
+        if state is None:
+            return set()
+        raw = (
+            state.attributes.get("connected_paired_devices")
+            or state.attributes.get("Connected Paired Devices")
+            or state.attributes.get("connected paired devices")
+            or []
+        )
+        if isinstance(raw, (list, tuple, set)):
+            raw = " ".join(str(item) for item in raw)
+        elif not isinstance(raw, str):
+            raw = str(raw)
+        return {
+            mac.upper()
+            for mac in re.findall(
+                r"(?i)\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b", raw
+            )
+        }
+
+    async def _async_bluetooth_changed(self, event) -> None:
+        """Adjust the phone's High Accuracy interval when car Bluetooth changes."""
+        await self._async_update_high_accuracy_interval()
+
+    async def _async_update_high_accuracy_interval(self) -> None:
+        """Send the selected interval to the Companion App."""
+        bluetooth_state = self._hass.states.get(self._bluetooth_sensor)
+        if bluetooth_state is None or bluetooth_state.state in ("unknown", "unavailable"):
+            _LOGGER.debug(
+                "Bluetooth sensor %s is not available yet", self._bluetooth_sensor
+            )
+            return
+
+        connected = self._connected_bluetooth_macs(bluetooth_state)
+        in_car = bool(connected.intersection(self._car_bluetooth_devices))
+        interval = (
+            self._car_high_accuracy_interval
+            if in_car
+            else self._normal_high_accuracy_interval
+        )
+        if interval == self._last_requested_interval:
+            return
+
+        if not self._notify_service or "." not in self._notify_service:
+            _LOGGER.warning(
+                "Invalid Companion App notify service: %s", self._notify_service
+            )
+            return
+        service_domain, service_name = self._notify_service.split(".", 1)
+        if not self._hass.services.has_service(service_domain, service_name):
+            _LOGGER.warning(
+                "Companion App notify service %s is not registered; cannot set High Accuracy interval",
+                self._notify_service,
+            )
+            return
+
+        try:
+            await self._hass.services.async_call(
+                service_domain,
+                service_name,
+                {
+                    "message": "command_high_accuracy_mode",
+                    "data": {
+                        "command": "high_accuracy_set_update_interval",
+                        "high_accuracy_update_interval": interval,
+                    },
+                },
+                blocking=True,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "Failed to set High Accuracy interval to %s seconds", interval
+            )
+            return
+
+        self._last_requested_interval = interval
+        _LOGGER.info(
+            "Set High Accuracy interval to %s seconds (%s Bluetooth mode)",
+            interval,
+            "car" if in_car else "normal",
+        )
+
+    def _filter_snapshot(self):
+        """Build versioned source-specific storage content."""
+        return {
+            "source": self._mobile_app,
+            "protected_zones": sorted(self._protected_zones),
+            "state": self._filter.snapshot(),
+        }
+
+    def _get_protected_zone(self, state):
+        """Use Companion membership, falling back to a zone state name."""
+        memberships = state.attributes.get("in_zones")
+        if isinstance(memberships, str):
+            memberships = [part.strip() for part in memberships.split(",")]
+        if isinstance(memberships, (list, tuple, set)):
+            candidates = self._protected_zones.intersection(memberships)
+        else:
+            candidates = set()
+            for entity_id in self._protected_zones:
+                zone = self._hass.states.get(entity_id)
+                names = {entity_id, entity_id.split(".", 1)[-1]}
+                if zone is not None:
+                    names.add(zone.name)
+                if state.state.casefold() in {name.casefold() for name in names}:
+                    candidates.add(entity_id)
+        if self._filter.active_zone in candidates:
+            return self._filter.active_zone
+        return next(iter(sorted(candidates)), None)
+
+    @property
+    def _high_accuracy_active(self) -> bool:
+        """Only a confirmed ON state bypasses normal forwarding rules."""
+        state = (
+            self._hass.states.get(self._high_accuracy_sensor)
+            if self._high_accuracy_sensor
+            else None
+        )
+        return state is not None and state.state == "on"
+
+    @property
+    def extra_state_attributes(self):
+        """Expose why an update was filtered and the successful-send timestamp."""
+        return {
+            "filter_reason": self._filter_reason,
+            "high_accuracy_active": self._high_accuracy_active,
+            "protected_zone": self._filter.active_zone,
+            "zone_entered_at": self._filter.entered_at,
+            "last_forwarded_at": self._filter.last_sent_at,
+        }
 
     @property
     def _issue_id(self) -> str:
@@ -233,7 +452,13 @@ class DawarichTrackerSensor(SensorEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         """Clean up when entity is removed."""
-        self._async_unsubscribe_state_changed()
+        self._closing = True
+        if self._async_unsubscribe_state_changed is not None:
+            self._async_unsubscribe_state_changed()
+        if self._async_unsubscribe_bluetooth_changed is not None:
+            self._async_unsubscribe_bluetooth_changed()
+        async with self._send_lock:
+            await self._filter_store.async_save(self._filter_snapshot())
         if self._repair_issue_created:
             async_delete_issue(self._hass, DOMAIN, self._issue_id)
 
@@ -254,6 +479,13 @@ class DawarichTrackerSensor(SensorEntity):
 
     async def _async_update_callback(self, event):
         """Update the Dawarich API with the new location."""
+        async with self._send_lock:
+            if self._closing:
+                return
+            await self._async_process_update(event)
+
+    async def _async_process_update(self, event):
+        """Process updates serially, including successful-send bookkeeping."""
         if await self._async_check_is_disabled():
             return
 
@@ -284,12 +516,42 @@ class DawarichTrackerSensor(SensorEntity):
                     (
                         "The choosen device tracker (%s) is emitting a '%s' "
                         "source type which typically does not have coordinates. "
-                        "Please change the device tracker to one that provides GPS coordinates."
+                        "Please change the device tracker to one that provides "
+                        "GPS coordinates."
                     ),
                     self._mobile_app,
                     new_data.get(ATTR_SOURCE_TYPE),
                 )
             _LOGGER.debug("Coordinates are not present, skipping update")
+            return
+
+        latitude = finite_number(latitude)
+        longitude = finite_number(longitude)
+        if (
+            latitude is None
+            or longitude is None
+            or not (-90 <= latitude <= 90 and -180 <= longitude <= 180)
+        ):
+            self._filter_reason = "invalid_coordinates"
+            self.async_write_ha_state()
+            return
+        now = dt_util.utcnow().timestamp()
+        activity = (
+            self._hass.states.get(self._activity_sensor)
+            if self._activity_sensor
+            else None
+        )
+        allowed, self._filter_reason = self._filter.decision(
+            now=now,
+            zone=self._get_protected_zone(new_state),
+            activity=activity.state if activity else None,
+            activity_since=activity.last_changed.timestamp() if activity else None,
+            speed=new_data.get("speed", new_data.get("velocity")),
+            high_accuracy=self._high_accuracy_active,
+        )
+        self._filter_store.async_delay_save(self._filter_snapshot, 5)
+        if not allowed:
+            self.async_write_ha_state()
             return
 
         optional_params = await self._async_add_optional_params(new_data)
@@ -304,16 +566,29 @@ class DawarichTrackerSensor(SensorEntity):
                 int(optional_params["timestamp"]), tz=UTC
             ).isoformat()
 
+        # A fresh tracker event supplies the fix; keep its observation time,
+        # including when a slower API has queued subsequent updates.
+        optional_params.setdefault("timestamp", new_state.last_updated.isoformat())
+
         # Send to Dawarich API
-        response = await self._api.add_one_point(
-            name=self._device_name,
-            latitude=latitude,
-            longitude=longitude,
-            **optional_params,
-        )
+        try:
+            response = await self._api.add_one_point(
+                name=self._device_name,
+                latitude=latitude,
+                longitude=longitude,
+                **optional_params,
+            )
+        except Exception:  # noqa: BLE001 - isolate network errors from state callbacks
+            self._state = DawarichTrackerStates.ERROR
+            self._filter_reason = "api_error"
+            _LOGGER.exception("Could not forward a location to Dawarich")
+            self.async_write_ha_state()
+            return
         if response.success:
             _LOGGER.debug("Location sent to Dawarich API")
             self._state = DawarichTrackerStates.SUCCESS
+            self._filter.last_sent_at = dt_util.utcnow().timestamp()
+            self._filter_store.async_delay_save(self._filter_snapshot, 5)
         else:
             self._state = DawarichTrackerStates.ERROR
             _LOGGER.error(
@@ -321,6 +596,8 @@ class DawarichTrackerSensor(SensorEntity):
                 response.response_code,
                 response.error,
             )
+
+        self.async_write_ha_state()
 
     async def _async_add_optional_params(self, new_data: dict) -> dict:
         # Only include optional parameters if they have valid values
@@ -397,13 +674,15 @@ class DawarichTrackerSensor(SensorEntity):
 
         if device.disabled:
             _LOGGER.debug(
-                "State change detected for %s, however, Dawarich device is disabled, not updating.",
+                "State change detected for %s, however, Dawarich device is "
+                "disabled, not updating.",
                 self._mobile_app,
             )
             return True
         if entity_entry.disabled:
             _LOGGER.debug(
-                "State change detected for %s, however, Dawarich tracker sensor is disabled, not updating.",
+                "State change detected for %s, however, Dawarich tracker sensor is "
+                "disabled, not updating.",
                 self._mobile_app,
             )
             return True
