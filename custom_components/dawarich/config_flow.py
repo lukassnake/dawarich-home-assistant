@@ -380,7 +380,6 @@ class DawarichOptionsFlow(config_entries.OptionsFlowWithReload):
             (
                 "normal_high_accuracy_interval",
                 DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
-    DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
                 5,
                 3600,
                 1,
