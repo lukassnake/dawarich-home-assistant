@@ -117,7 +117,8 @@
           "notify_service": "Companion App notify service",
           "normal_high_accuracy_interval": "High Accuracy interval (seconds)",
           "car_high_accuracy_interval": "High Accuracy interval in car (seconds)",
-          "car_bluetooth_devices": "Car Bluetooth device MAC addresses (one per line)"
+          "car_bluetooth_devices": "Car Bluetooth device MAC addresses (one per line)",
+          "unknown_high_accuracy_interval": "High Accuracy interval for Unknown activity (seconds)"
         }
       }
     }

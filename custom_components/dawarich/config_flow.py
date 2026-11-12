@@ -27,6 +27,7 @@ from .const import (
     DEFAULT_CAR_BLUETOOTH_DEVICES,
     DEFAULT_CAR_HIGH_ACCURACY_INTERVAL,
     DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
+    DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
     DEFAULT_NOTIFY_SERVICE,
     DOMAIN,
 )
@@ -379,6 +380,7 @@ class DawarichOptionsFlow(config_entries.OptionsFlowWithReload):
             (
                 "normal_high_accuracy_interval",
                 DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
+    DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
                 5,
                 3600,
                 1,
@@ -386,6 +388,13 @@ class DawarichOptionsFlow(config_entries.OptionsFlowWithReload):
             (
                 "car_high_accuracy_interval",
                 DEFAULT_CAR_HIGH_ACCURACY_INTERVAL,
+                5,
+                3600,
+                1,
+            ),
+            (
+                "unknown_high_accuracy_interval",
+                DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
                 5,
                 3600,
                 1,

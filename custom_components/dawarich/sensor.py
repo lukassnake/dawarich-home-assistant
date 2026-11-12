@@ -47,6 +47,7 @@ from .const import (
     DEFAULT_BLUETOOTH_SENSOR,
     DEFAULT_CAR_HIGH_ACCURACY_INTERVAL,
     DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
+    DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
     DEFAULT_NOTIFY_SERVICE,
     DOMAIN,
     DawarichTrackerStates,
@@ -219,11 +220,18 @@ class DawarichTrackerSensor(SensorEntity):
             options.get(
                 "normal_high_accuracy_interval",
                 DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
+    DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
             )
         )
         self._car_high_accuracy_interval = int(
             options.get(
                 "car_high_accuracy_interval", DEFAULT_CAR_HIGH_ACCURACY_INTERVAL
+            )
+        )
+        self._unknown_high_accuracy_interval = int(
+            options.get(
+                "unknown_high_accuracy_interval",
+                DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
             )
         )
         self._notify_service = options.get("notify_service", DEFAULT_NOTIFY_SERVICE)
@@ -243,6 +251,7 @@ class DawarichTrackerSensor(SensorEntity):
 
         self._async_unsubscribe_state_changed = None
         self._async_unsubscribe_bluetooth_changed = None
+        self._async_unsubscribe_activity_changed = None
         self._state: DawarichTrackerStates = DawarichTrackerStates.UNKNOWN
         self._attr_options = [state.value for state in DawarichTrackerStates]
 
@@ -275,6 +284,13 @@ class DawarichTrackerSensor(SensorEntity):
                 entity_ids=[self._bluetooth_sensor],
                 action=self._async_bluetooth_changed,
             )
+        if self._activity_sensor:
+            self._async_unsubscribe_activity_changed = async_track_state_change_event(
+                hass=self._hass,
+                entity_ids=[self._activity_sensor],
+                action=self._async_activity_changed,
+            )
+        if self._bluetooth_sensor or self._activity_sensor:
             await self._async_update_high_accuracy_interval()
 
     @staticmethod
@@ -303,6 +319,10 @@ class DawarichTrackerSensor(SensorEntity):
         """Adjust the phone's High Accuracy interval when car Bluetooth changes."""
         await self._async_update_high_accuracy_interval()
 
+    async def _async_activity_changed(self, event) -> None:
+        """Adjust the interval when detected activity changes."""
+        await self._async_update_high_accuracy_interval()
+
     async def _async_update_high_accuracy_interval(self) -> None:
         """Send the selected interval to the Companion App."""
         bluetooth_state = self._hass.states.get(self._bluetooth_sensor)
@@ -314,11 +334,21 @@ class DawarichTrackerSensor(SensorEntity):
 
         connected = self._connected_bluetooth_macs(bluetooth_state)
         in_car = bool(connected.intersection(self._car_bluetooth_devices))
-        interval = (
-            self._car_high_accuracy_interval
-            if in_car
-            else self._normal_high_accuracy_interval
+        activity_state = (
+            self._hass.states.get(self._activity_sensor)
+            if self._activity_sensor
+            else None
         )
+        activity = activity_state.state.lower() if activity_state else None
+        if in_car:
+            interval = self._car_high_accuracy_interval
+            mode = "car"
+        elif activity == "unknown":
+            interval = self._unknown_high_accuracy_interval
+            mode = "unknown activity"
+        else:
+            interval = self._normal_high_accuracy_interval
+            mode = "normal"
         if interval == self._last_requested_interval:
             return
 
@@ -356,9 +386,11 @@ class DawarichTrackerSensor(SensorEntity):
 
         self._last_requested_interval = interval
         _LOGGER.info(
-            "Set High Accuracy interval to %s seconds (%s Bluetooth mode)",
+            "Set High Accuracy interval to %s seconds (mode=%s, activity=%s, car_bluetooth=%s)",
             interval,
-            "car" if in_car else "normal",
+            mode,
+            activity or "not configured",
+            ",".join(sorted(connected.intersection(self._car_bluetooth_devices))) or "none",
         )
 
     def _filter_snapshot(self):
@@ -457,6 +489,8 @@ class DawarichTrackerSensor(SensorEntity):
             self._async_unsubscribe_state_changed()
         if self._async_unsubscribe_bluetooth_changed is not None:
             self._async_unsubscribe_bluetooth_changed()
+        if self._async_unsubscribe_activity_changed is not None:
+            self._async_unsubscribe_activity_changed()
         async with self._send_lock:
             await self._filter_store.async_save(self._filter_snapshot())
         if self._repair_issue_created:

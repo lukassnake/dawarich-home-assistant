@@ -117,7 +117,8 @@
           "notify_service": "Notify služba Companion App",
           "normal_high_accuracy_interval": "Běžný interval High Accuracy (sekundy)",
           "car_high_accuracy_interval": "Interval High Accuracy v autě (sekundy)",
-          "car_bluetooth_devices": "MAC adresy Bluetooth zařízení auta (jedna na řádek)"
+          "car_bluetooth_devices": "MAC adresy Bluetooth zařízení auta (jedna na řádek)",
+          "unknown_high_accuracy_interval": "Interval High Accuracy při aktivitě Unknown (sekundy)"
         }
       }
     }
