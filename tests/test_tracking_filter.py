@@ -15,6 +15,7 @@ sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 FilterSettings, TrackingFilter = module.FilterSettings, module.TrackingFilter
 parse_bluetooth_macs = module.parse_bluetooth_macs
+select_high_accuracy_interval = module.select_high_accuracy_interval
 
 
 class TestTrackingFilter(unittest.TestCase):
@@ -202,3 +203,37 @@ class TestBluetoothMacParsing(unittest.TestCase):
 
     def test_ignores_invalid_values(self):
         self.assertEqual(parse_bluetooth_macs("not a MAC\n00:11:22:33:44"), set())
+
+
+class TestHighAccuracyIntervalSelection(unittest.TestCase):
+    def setUp(self):
+        self.car_macs = {"FC:35:E6:A3:1C:32", "48:F0:7B:C4:DE:21", "E2:C0:B3:05:A3:DF"}
+
+    def select(self, activity, connected):
+        return select_high_accuracy_interval(
+            activity, connected, self.car_macs, 7, 30, 15
+        )
+
+    def test_car_has_priority_over_unknown_activity(self):
+        self.assertEqual(
+            self.select("unknown", {"FC:35:E6:A3:1C:32"}),
+            (7, "car_bluetooth_connected", {"FC:35:E6:A3:1C:32"}),
+        )
+
+    def test_unknown_without_car_uses_30_seconds(self):
+        self.assertEqual(
+            self.select("unknown", {"D8:80:3C:CB:58:CD"}),
+            (30, "activity_unknown_without_car_bluetooth", set()),
+        )
+
+    def test_known_activity_without_car_uses_15_seconds(self):
+        self.assertEqual(
+            self.select("walking", {"D8:80:3C:CB:58:CD"}),
+            (15, "normal_without_car_bluetooth", set()),
+        )
+
+    def test_no_activity_sensor_uses_normal_interval(self):
+        self.assertEqual(
+            self.select(None, set()),
+            (15, "normal_without_car_bluetooth", set()),
+        )

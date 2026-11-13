@@ -118,7 +118,8 @@
           "normal_high_accuracy_interval": "Běžný interval High Accuracy (sekundy)",
           "car_high_accuracy_interval": "Interval High Accuracy v autě (sekundy)",
           "car_bluetooth_devices": "MAC adresy Bluetooth zařízení auta (jedna na řádek)",
-          "unknown_high_accuracy_interval": "Interval High Accuracy při aktivitě Unknown (sekundy)"
+          "unknown_high_accuracy_interval": "Interval High Accuracy při aktivitě Unknown (sekundy)",
+          "debug_bluetooth_logging": "Zapnout podrobné Bluetooth debug logování"
         }
       }
     }

@@ -141,3 +141,20 @@ class TrackingFilter:
             self.active_zone = None
             self.entered_at = None
             self.outside_since = None
+
+
+def select_high_accuracy_interval(
+    activity: str | None,
+    connected_macs: set[str],
+    car_macs: set[str],
+    car_interval: int,
+    unknown_interval: int,
+    normal_interval: int,
+) -> tuple[int, str, set[str]]:
+    """Select Companion App interval; a connected car always has priority."""
+    matched_cars = connected_macs.intersection(car_macs)
+    if matched_cars:
+        return car_interval, "car_bluetooth_connected", matched_cars
+    if activity == "unknown":
+        return unknown_interval, "activity_unknown_without_car_bluetooth", matched_cars
+    return normal_interval, "normal_without_car_bluetooth", matched_cars

@@ -376,6 +376,10 @@ class DawarichOptionsFlow(config_entries.OptionsFlowWithReload):
         ] = selector.TextSelector(
             selector.TextSelectorConfig(multiline=True)
         )
+        fields[vol.Required(
+            "debug_bluetooth_logging",
+            default=options.get("debug_bluetooth_logging", False),
+        )] = bool
         for key, default, minimum, maximum, step in (
             (
                 "normal_high_accuracy_interval",

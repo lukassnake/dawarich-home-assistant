@@ -47,8 +47,8 @@ from .const import (
     DEFAULT_BLUETOOTH_SENSOR,
     DEFAULT_CAR_HIGH_ACCURACY_INTERVAL,
     DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
-    DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
     DEFAULT_NOTIFY_SERVICE,
+    DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
     DOMAIN,
     DawarichTrackerStates,
 )
@@ -58,6 +58,7 @@ from .tracking_filter import (
     TrackingFilter,
     finite_number,
     parse_bluetooth_macs,
+    select_high_accuracy_interval,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -220,18 +221,17 @@ class DawarichTrackerSensor(SensorEntity):
             options.get(
                 "normal_high_accuracy_interval",
                 DEFAULT_NORMAL_HIGH_ACCURACY_INTERVAL,
-    DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
             )
+        )
+        self._unknown_high_accuracy_interval = int(
+            options.get("unknown_high_accuracy_interval", DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL)
+        )
+        self._debug_bluetooth_logging = bool(
+            options.get("debug_bluetooth_logging", False)
         )
         self._car_high_accuracy_interval = int(
             options.get(
                 "car_high_accuracy_interval", DEFAULT_CAR_HIGH_ACCURACY_INTERVAL
-            )
-        )
-        self._unknown_high_accuracy_interval = int(
-            options.get(
-                "unknown_high_accuracy_interval",
-                DEFAULT_UNKNOWN_HIGH_ACCURACY_INTERVAL,
             )
         )
         self._notify_service = options.get("notify_service", DEFAULT_NOTIFY_SERVICE)
@@ -290,8 +290,8 @@ class DawarichTrackerSensor(SensorEntity):
                 entity_ids=[self._activity_sensor],
                 action=self._async_activity_changed,
             )
-        if self._bluetooth_sensor or self._activity_sensor:
-            await self._async_update_high_accuracy_interval()
+        # Evaluate once at startup, after listeners have been registered.
+        await self._async_update_high_accuracy_interval(trigger="startup")
 
     @staticmethod
     def _connected_bluetooth_macs(state) -> set[str]:
@@ -316,39 +316,51 @@ class DawarichTrackerSensor(SensorEntity):
         }
 
     async def _async_bluetooth_changed(self, event) -> None:
-        """Adjust the phone's High Accuracy interval when car Bluetooth changes."""
-        await self._async_update_high_accuracy_interval()
+        """Adjust the phone interval whenever Bluetooth state or attributes change."""
+        await self._async_update_high_accuracy_interval(trigger="bluetooth_change")
 
     async def _async_activity_changed(self, event) -> None:
-        """Adjust the interval when detected activity changes."""
-        await self._async_update_high_accuracy_interval()
+        """Re-evaluate interval when detected activity changes."""
+        await self._async_update_high_accuracy_interval(trigger="activity_change")
 
-    async def _async_update_high_accuracy_interval(self) -> None:
-        """Send the selected interval to the Companion App."""
+    async def _async_update_high_accuracy_interval(self, trigger: str = "manual") -> None:
+        """Select and send the appropriate Companion App interval."""
         bluetooth_state = self._hass.states.get(self._bluetooth_sensor)
-        if bluetooth_state is None or bluetooth_state.state in ("unknown", "unavailable"):
-            _LOGGER.debug(
-                "Bluetooth sensor %s is not available yet", self._bluetooth_sensor
-            )
-            return
-
-        connected = self._connected_bluetooth_macs(bluetooth_state)
-        in_car = bool(connected.intersection(self._car_bluetooth_devices))
         activity_state = (
             self._hass.states.get(self._activity_sensor)
             if self._activity_sensor
             else None
         )
-        activity = activity_state.state.lower() if activity_state else None
-        if in_car:
-            interval = self._car_high_accuracy_interval
-            mode = "car"
-        elif activity == "unknown":
-            interval = self._unknown_high_accuracy_interval
-            mode = "unknown activity"
-        else:
-            interval = self._normal_high_accuracy_interval
-            mode = "normal"
+        activity = activity_state.state if activity_state is not None else None
+        connected = self._connected_bluetooth_macs(bluetooth_state)
+        interval, reason, matched_cars = select_high_accuracy_interval(
+            activity=activity,
+            connected_macs=connected,
+            car_macs=self._car_bluetooth_devices,
+            car_interval=self._car_high_accuracy_interval,
+            unknown_interval=self._unknown_high_accuracy_interval,
+            normal_interval=self._normal_high_accuracy_interval,
+        )
+
+        if self._debug_bluetooth_logging:
+            _LOGGER.info(
+                "Bluetooth interval diagnostic: trigger=%s, sensor=%s, "
+                "sensor_state=%s, connected_macs=%s, configured_car_macs=%s, "
+                "matched_car_macs=%s, activity_sensor=%s, activity=%s, "
+                "selected_interval=%ss, reason=%s, previous_requested_interval=%s",
+                trigger,
+                self._bluetooth_sensor,
+                bluetooth_state.state if bluetooth_state is not None else "missing",
+                sorted(connected),
+                sorted(self._car_bluetooth_devices),
+                sorted(matched_cars),
+                self._activity_sensor,
+                activity if activity is not None else "not_configured_or_missing",
+                interval,
+                reason,
+                self._last_requested_interval,
+            )
+
         if interval == self._last_requested_interval:
             return
 
@@ -365,6 +377,14 @@ class DawarichTrackerSensor(SensorEntity):
             )
             return
 
+        _LOGGER.info(
+            "Dawarich selecting High Accuracy interval %ss: reason=%s, "
+            "matched_car_macs=%s, activity=%s",
+            interval,
+            reason,
+            sorted(matched_cars),
+            activity if activity is not None else "not_configured_or_missing",
+        )
         try:
             await self._hass.services.async_call(
                 service_domain,
@@ -380,17 +400,16 @@ class DawarichTrackerSensor(SensorEntity):
             )
         except Exception:  # noqa: BLE001
             _LOGGER.exception(
-                "Failed to set High Accuracy interval to %s seconds", interval
+                "Failed to call Companion App service %s for interval %s seconds",
+                self._notify_service,
+                interval,
             )
             return
 
         self._last_requested_interval = interval
         _LOGGER.info(
-            "Set High Accuracy interval to %s seconds (mode=%s, activity=%s, car_bluetooth=%s)",
+            "Companion App notify service call completed for High Accuracy interval %s seconds",
             interval,
-            mode,
-            activity or "not configured",
-            ",".join(sorted(connected.intersection(self._car_bluetooth_devices))) or "none",
         )
 
     def _filter_snapshot(self):
